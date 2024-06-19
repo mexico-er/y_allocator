@@ -1,4 +1,4 @@
-# y_allocator
+# yallocator
 
 a `malloc` alternative.
 
