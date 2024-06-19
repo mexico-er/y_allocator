@@ -1,7 +1,10 @@
 #include "y_allocator.h"
 
-// Define how many pages you want to initially allocate
-#define INITIAL_PAGES 10
+// Use `#define INITIAL_PAGES amount` for the amount of initial pages. The default is 4
+
+#ifndef Y_INITIAL_PAGES
+#define Y_INITIAL_PAGES 4 // Set default initial page amount if one wasn't already set by the user
+#endif
 
 // Declare a global instance of yinfo_t to keep track of the memory allocator's state
 struct yinfo_t yinfo_instance;
@@ -10,7 +13,7 @@ struct yinfo_t *yinfo = &yinfo_instance;
 // Function to initialize the memory allocator
 int init_yallocator() {
     // Calculate the initial size of memory to allocate
-    size_t initial_size = getpagesize() * INITIAL_PAGES;
+    size_t initial_size = getpagesize() * Y_INITIAL_PAGES;
 
     // Allocate memory using mmap
     void *start = mmap(NULL, initial_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
