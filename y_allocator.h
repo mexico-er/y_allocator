@@ -12,9 +12,6 @@
 #define Y_FAILURE -1
 #define Y_SUCCESS 0
 
-#define Y_FALSE 0
-#define Y_TRUE 1
-
 struct ychunk_t {
     size_t size;
     atomic_bool inUse;
