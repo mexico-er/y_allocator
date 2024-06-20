@@ -29,4 +29,6 @@ int init_yallocator();
 void *yalloc(size_t size);
 void yfree(void *__ptr);
 
+int isYallocatorReady();
+
 #endif
