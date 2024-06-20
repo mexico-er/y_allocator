@@ -1,33 +1,31 @@
 #ifndef Y_ALLOCATOR_H
 #define Y_ALLOCATOR_H
 
-#include <stdatomic.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <stdio.h>
+#include <pthread.h>
 
 #define Y_FAILURE -1
 #define Y_SUCCESS 0
 
+#define Y_ALIGNMENT 16
+#define Y_ALIGN(size) (((size) + (Y_ALIGNMENT - 1)) & ~(Y_ALIGNMENT - 1))
+
 struct ychunk_t {
     size_t size;
-    atomic_bool inUse;
+    int inUse;
     struct ychunk_t *next;
 };
 
 struct yinfo_t {
-    struct ychunk_t *start;
-    struct ychunk_t *first;
+    pthread_mutex_t lock;
+    struct ychunk_t *free_list;
     size_t available_mem;
 };
 
 int init_yallocator();
-
-void *expand_memory(size_t size);
-
 void *yalloc(size_t size);
 void yfree(void *__ptr);
 
