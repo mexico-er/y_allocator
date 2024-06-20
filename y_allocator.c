@@ -11,6 +11,8 @@
 struct yinfo_t yinfo_instance = {PTHREAD_MUTEX_INITIALIZER, NULL, 0};
 struct yinfo_t *yinfo = &yinfo_instance;
 
+static int y_ready = 0;
+
 static inline void *expand_memory(size_t size) {
     size_t additional_size = getpagesize() * ((size + sizeof(struct ychunk_t)) / getpagesize() + 1);
 
@@ -45,7 +47,13 @@ int init_yallocator() {
     yinfo->free_list = first;
     yinfo->available_mem = first->size;
 
+    y_ready = 1;
+
     return Y_SUCCESS;
+}
+
+int isYallocatorReady() {
+    return y_ready;
 }
 
 void *yalloc(size_t size) {
