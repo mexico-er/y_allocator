@@ -1,18 +1,32 @@
 #include "y_allocator.h"
-#include <sys/mman.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <stdatomic.h>
+#include <sys/mman.h>
 
 #ifndef Y_INITIAL_PAGES
 #define Y_INITIAL_PAGES 4
 #endif
 
-#define ALIGNMENT 16
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1))
+#define Y_BATCH_PAGES 16
 
-struct yinfo_t yinfo_instance;
+struct yinfo_t yinfo_instance = {PTHREAD_MUTEX_INITIALIZER, NULL, 0};
 struct yinfo_t *yinfo = &yinfo_instance;
+
+static inline void *expand_memory(size_t size) {
+    size_t additional_size = getpagesize() * ((size + sizeof(struct ychunk_t)) / getpagesize() + 1);
+
+    void *start = mmap(NULL, additional_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (start == MAP_FAILED) {
+        perror("mmap");
+        return NULL;
+    }
+
+    struct ychunk_t *new_chunk = (struct ychunk_t *)start;
+    new_chunk->size = additional_size - sizeof(struct ychunk_t);
+    new_chunk->inUse = 0;
+    new_chunk->next = NULL;
+
+    return new_chunk;
+}
 
 int init_yallocator() {
     size_t initial_size = getpagesize() * Y_INITIAL_PAGES;
@@ -25,76 +39,69 @@ int init_yallocator() {
 
     struct ychunk_t *first = (struct ychunk_t *)start;
     first->size = initial_size - sizeof(struct ychunk_t);
-    first->inUse = ATOMIC_VAR_INIT(0);
+    first->inUse = 0;
     first->next = NULL;
 
-    yinfo->start = first;
-    yinfo->first = first;
+    yinfo->free_list = first;
     yinfo->available_mem = first->size;
 
     return Y_SUCCESS;
 }
 
-void *expand_memory(size_t size) {
-    size_t additional_size = getpagesize() * ((size + sizeof(struct ychunk_t)) / getpagesize() + 1);
-
-    void *start = mmap(NULL, additional_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (start == MAP_FAILED) {
-        perror("mmap");
-        return (void *)Y_FAILURE;
-    }
-
-    struct ychunk_t *new_chunk = (struct ychunk_t *)start;
-    new_chunk->size = additional_size - sizeof(struct ychunk_t);
-    new_chunk->inUse = ATOMIC_VAR_INIT(0);
-    new_chunk->next = NULL;
-
-    struct ychunk_t *chunk = yinfo->first;
-    while (chunk->next != NULL) {
-        chunk = chunk->next;
-    }
-    chunk->next = new_chunk;
-
-    yinfo->available_mem += new_chunk->size;
-
-    return (void *)Y_SUCCESS;
-}
-
 void *yalloc(size_t size) {
     if (size == 0) {
-        return (void *)Y_FAILURE;
+        return NULL;
     }
 
-    size = ALIGN(size);
+    size = Y_ALIGN(size);
 
-    struct ychunk_t *chunk = yinfo->first;
+    pthread_mutex_lock(&yinfo->lock);
+
+    struct ychunk_t *prev = NULL;
+    struct ychunk_t *chunk = yinfo->free_list;
+
     while (chunk != NULL) {
-        if (!atomic_load(&chunk->inUse) && chunk->size >= size) {
+        if (!chunk->inUse && chunk->size >= size) {
             size_t remaining_size = chunk->size - size - sizeof(struct ychunk_t);
 
             if (remaining_size > sizeof(struct ychunk_t)) {
                 struct ychunk_t *new_chunk = (struct ychunk_t *)((char *)chunk + sizeof(struct ychunk_t) + size);
                 new_chunk->size = remaining_size;
-                new_chunk->inUse = ATOMIC_VAR_INIT(0);
+                new_chunk->inUse = 0;
                 new_chunk->next = chunk->next;
 
                 chunk->size = size;
                 chunk->next = new_chunk;
             }
 
-            atomic_store(&chunk->inUse, 1);
+            chunk->inUse = 1;
+
+            if (prev) {
+                prev->next = chunk->next;
+            } else {
+                yinfo->free_list = chunk->next;
+            }
+
             yinfo->available_mem -= (chunk->size + sizeof(struct ychunk_t));
+            pthread_mutex_unlock(&yinfo->lock);
 
             return (void *)((char *)chunk + sizeof(struct ychunk_t));
         }
+        prev = chunk;
         chunk = chunk->next;
     }
 
-    if (expand_memory(size) == (void *)Y_FAILURE) {
-        return (void *)Y_FAILURE;
+    chunk = expand_memory(size);
+    if (!chunk) {
+        pthread_mutex_unlock(&yinfo->lock);
+        return NULL;
     }
 
-    return yalloc(size);
+    chunk->inUse = 1;
+    yinfo->available_mem += chunk->size;
+
+    pthread_mutex_unlock(&yinfo->lock);
+    return (void *)((char *)chunk + sizeof(struct ychunk_t));
 }
 
 void yfree(void *__ptr) {
@@ -103,23 +110,29 @@ void yfree(void *__ptr) {
     }
 
     struct ychunk_t *chunk = (struct ychunk_t *)((char *)__ptr - sizeof(struct ychunk_t));
-    if (atomic_load(&chunk->inUse)) {
-        atomic_store(&chunk->inUse, 0);
-        yinfo->available_mem += (chunk->size + sizeof(struct ychunk_t));
 
-        if (chunk->next != NULL && !atomic_load(&chunk->next->inUse)) {
-            chunk->size += sizeof(struct ychunk_t) + chunk->next->size;
-            chunk->next = chunk->next->next;
-        }
+    pthread_mutex_lock(&yinfo->lock);
 
-        struct ychunk_t *prev = yinfo->start;
-        while (prev != NULL && prev->next != chunk) {
-            prev = prev->next;
-        }
+    chunk->inUse = 0;
+    yinfo->available_mem += (chunk->size + sizeof(struct ychunk_t));
 
-        if (prev != NULL && !atomic_load(&prev->inUse)) {
-            prev->size += sizeof(struct ychunk_t) + chunk->size;
-            prev->next = chunk->next;
-        }
+    if (chunk->next != NULL && !chunk->next->inUse) {
+        chunk->size += sizeof(struct ychunk_t) + chunk->next->size;
+        chunk->next = chunk->next->next;
     }
+
+    struct ychunk_t *prev = yinfo->free_list;
+    while (prev != NULL && prev->next != chunk) {
+        prev = prev->next;
+    }
+
+    if (prev != NULL && !prev->inUse) {
+        prev->size += sizeof(struct ychunk_t) + chunk->size;
+        prev->next = chunk->next;
+    } else {
+        chunk->next = yinfo->free_list;
+        yinfo->free_list = chunk;
+    }
+
+    pthread_mutex_unlock(&yinfo->lock);
 }
